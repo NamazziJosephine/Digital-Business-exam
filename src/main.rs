@@ -1,5 +1,5 @@
 // NutriBudget entry point
-// Handles CLI argument parsing and output formatting only.
+// Handles CLI argument parsing, interactive prompts, and output formatting only.
 // All business logic lives in lib.rs.
 
 use clap::Parser;
@@ -7,9 +7,11 @@ use nutribudget::{
     average_daily_nutrition, build_meal_database, build_shopping_list,
     calculate_shopping_total, day_name, filter_meals, generate_week_plan, validate_inputs,
 };
+use std::io::Write;
 
 // CLI argument definitions using clap derive macros.
-// Each field maps to a --flag the user types in the terminal.
+// Every flag is optional. Any value not provided on the command line
+// is collected through an interactive prompt instead.
 #[derive(Parser, Debug)]
 #[command(
     name = "nutribudget",
@@ -20,47 +22,58 @@ use nutribudget::{
 struct Args {
     // Weekly food budget in euros.
     #[arg(long, help = "Weekly budget in euros (e.g. 35)")]
-    budget: f64,
+    budget: Option<f64>,
 
     // Dietary restriction string.
     #[arg(
         long,
-        default_value = "none",
         help = "Dietary restriction: none | vegetarian | vegan | gluten-free | lactose-free"
     )]
-    diet: String,
+    diet: Option<String>,
 
     // Available kitchen equipment string.
     #[arg(
         long,
-        default_value = "shared-dorm-kitchen",
         help = "Equipment: microwave-only | shared-dorm-kitchen | full-kitchen"
     )]
-    equipment: String,
+    equipment: Option<String>,
 
     // Maximum preparation time per meal in minutes.
-    #[arg(long, default_value = "20", help = "Max prep time per meal in minutes (5-60)")]
-    time: u32,
+    #[arg(long, help = "Max prep time per meal in minutes (5-60)")]
+    time: Option<u32>,
 
     // Comma-separated list of ingredients already on hand.
     #[arg(
         long,
-        default_value = "",
         help = "Ingredients you already have, comma-separated (e.g. \"pasta, eggs, onion\")"
     )]
-    have: String,
+    have: Option<String>,
 }
 
 fn main() {
     let args = Args::parse();
 
-    let constraints = match validate_inputs(
-        args.budget,
-        &args.diet,
-        &args.equipment,
-        args.time,
-        &args.have,
-    ) {
+    // Collect any value the user did not pass as a flag through interactive prompts.
+    let interactive = args.budget.is_none()
+        || args.diet.is_none()
+        || args.equipment.is_none()
+        || args.time.is_none()
+        || args.have.is_none();
+
+    if interactive {
+        println!();
+        println!("NutriBudget interactive setup");
+        println!("Press Enter to accept the value shown in [brackets].");
+        println!();
+    }
+
+    let budget = args.budget.unwrap_or_else(prompt_budget);
+    let diet = args.diet.unwrap_or_else(prompt_diet);
+    let equipment = args.equipment.unwrap_or_else(prompt_equipment);
+    let time = args.time.unwrap_or_else(prompt_time);
+    let have = args.have.unwrap_or_else(prompt_have);
+
+    let constraints = match validate_inputs(budget, &diet, &equipment, time, &have) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -83,7 +96,11 @@ fn main() {
     let total_cost = calculate_shopping_total(&shopping_list);
     let avg_nutrition = average_daily_nutrition(&days);
 
-    print_header(&constraints.equipment.display_name().to_string(), &constraints.diet.display_name().to_string(), constraints.budget_eur);
+    print_header(
+        constraints.equipment.display_name(),
+        constraints.diet.display_name(),
+        constraints.budget_eur,
+    );
     print_week_schedule(&days);
     print_shopping_list(&shopping_list, total_cost);
     print_nutrition_summary(&avg_nutrition);
@@ -94,7 +111,82 @@ fn main() {
     }
 }
 
-// Prints the top banner with the user's constraints.
+// Prints a prompt and reads one trimmed line from standard input.
+fn read_answer(prompt: &str) -> String {
+    print!("{}", prompt);
+    let _ = std::io::stdout().flush();
+    let mut input = String::new();
+    let _ = std::io::stdin().read_line(&mut input);
+    input.trim().to_string()
+}
+
+// Asks for the weekly budget until a valid number in range is entered.
+fn prompt_budget() -> f64 {
+    loop {
+        let answer = read_answer("Weekly budget in euros (10 to 200): ");
+        match answer.parse::<f64>() {
+            Ok(value) if (10.0..=200.0).contains(&value) => return value,
+            Ok(_) => println!("  Please enter a number between 10 and 200."),
+            Err(_) => println!("  That is not a number. Try something like 35."),
+        }
+    }
+}
+
+// Asks for a dietary restriction until a valid option is entered.
+fn prompt_diet() -> String {
+    loop {
+        let answer = read_answer(
+            "Diet (none | vegetarian | vegan | gluten-free | lactose-free) [none]: ",
+        );
+        if answer.is_empty() {
+            return "none".to_string();
+        }
+        let valid = ["none", "vegetarian", "vegan", "gluten-free", "lactose-free"];
+        if valid.contains(&answer.as_str()) {
+            return answer;
+        }
+        println!("  Unknown diet. Valid options: none, vegetarian, vegan, gluten-free, lactose-free.");
+    }
+}
+
+// Asks for the available equipment until a valid option is entered.
+fn prompt_equipment() -> String {
+    loop {
+        let answer = read_answer(
+            "Equipment (microwave-only | shared-dorm-kitchen | full-kitchen) [shared-dorm-kitchen]: ",
+        );
+        if answer.is_empty() {
+            return "shared-dorm-kitchen".to_string();
+        }
+        let valid = ["microwave-only", "shared-dorm-kitchen", "full-kitchen"];
+        if valid.contains(&answer.as_str()) {
+            return answer;
+        }
+        println!("  Unknown equipment. Valid options: microwave-only, shared-dorm-kitchen, full-kitchen.");
+    }
+}
+
+// Asks for the max prep time until a valid number in range is entered.
+fn prompt_time() -> u32 {
+    loop {
+        let answer = read_answer("Max minutes per meal (5 to 60) [20]: ");
+        if answer.is_empty() {
+            return 20;
+        }
+        match answer.parse::<u32>() {
+            Ok(value) if (5..=60).contains(&value) => return value,
+            Ok(_) => println!("  Please enter a number between 5 and 60."),
+            Err(_) => println!("  That is not a number. Try something like 20."),
+        }
+    }
+}
+
+// Asks for ingredients already on hand. An empty answer means none.
+fn prompt_have() -> String {
+    read_answer("Ingredients you already have, comma separated (or press Enter for none): ")
+}
+
+// Prints the top banner with the constraints used for this plan.
 fn print_header(equipment: &str, diet: &str, budget: f64) {
     println!();
     println!("NutriBudget -- Week Plan");
@@ -105,7 +197,7 @@ fn print_header(equipment: &str, diet: &str, budget: f64) {
     println!("{}", "-".repeat(70));
 }
 
-// Prints the 7-day meal schedule in the format shown in the spec.
+// Prints the 7-day meal schedule.
 fn print_week_schedule(days: &[nutribudget::DayPlan]) {
     println!();
     for (i, day) in days.iter().enumerate() {
@@ -178,7 +270,7 @@ fn print_cost_summary(total: f64, budget: f64) {
             total - budget,
             budget
         );
-        println!("Try --time 15 or --equipment microwave-only to reduce costs.");
+        println!("Try a shorter max time or simpler equipment to reduce costs.");
     }
     println!();
 }
